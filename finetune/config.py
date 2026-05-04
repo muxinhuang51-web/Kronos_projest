@@ -19,7 +19,8 @@ class Config:
 
         # Sliding window parameters for creating samples.
         self.lookback_window = 90  # Number of past time steps for input.
-        self.predict_window = 10  # Number of future time steps for prediction.
+        # 5 日持有期策略：模型直接预测未来 5 个交易日。
+        self.predict_window = 5  # Number of future time steps for prediction.
         self.max_context = 512  # Maximum context length for the model.
 
         # Features to be used from the raw data.
@@ -35,6 +36,7 @@ class Config:
         self.train_time_range = ["2011-01-01", "2022-12-31"]
         self.val_time_range = ["2022-09-01", "2024-06-30"]
         self.test_time_range = ["2024-04-01", "2025-06-05"]
+        # 5 日 A 股策略的回测区间，保留与测试区间一致的尾段便于对比。
         self.backtest_time_range = ["2024-07-01", "2025-06-05"]
 
         # TODO: Directory to save the processed, pickled datasets.
@@ -109,13 +111,14 @@ class Config:
         # =================================================================
         # Backtesting Parameters
         # =================================================================
-        self.backtest_n_symbol_hold = 50  # Number of symbols to hold in the portfolio.
+        # 一版可直接跑的 5 日 A 股策略预设：横截面选前 30，换手不要太高。
+        self.backtest_n_symbol_hold = 30  # Number of symbols to hold in the portfolio.
         self.backtest_n_symbol_drop = 5  # Number of symbols to drop from the pool.
         self.backtest_hold_thresh = 5  # Minimum holding period for a stock.
         self.inference_T = 0.6
         self.inference_top_p = 0.9
         self.inference_top_k = 0
-        self.inference_sample_count = 5
+        self.inference_sample_count = 3
         self.backtest_batch_size = 1000
         self.backtest_benchmark = self._set_benchmark(self.instrument)
 

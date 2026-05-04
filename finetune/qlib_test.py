@@ -1,6 +1,8 @@
 import os
 import sys
 import argparse
+
+from pathlib import Path
 import pickle
 from collections import defaultdict
 
@@ -19,8 +21,9 @@ from qlib.contrib.strategy import TopkDropoutStrategy
 from qlib.utils import flatten_dict
 from qlib.utils.time import Freq
 
-# Ensure project root is in the Python path
-sys.path.append("../")
+# Ensure project root is in the Python path regardless of where the script is run from
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 from config import Config
 from model.kronos import Kronos, KronosTokenizer, auto_regressive_inference
 
@@ -158,8 +161,49 @@ class QlibBacktest:
             "cum_bench": report["bench"].cumsum(),
             "cum_return_w_cost": (report["return"] - report["cost"]).cumsum(),
             "cum_ex_return_w_cost": (report["return"] - report["bench"] - report["cost"]).cumsum(),
+            # 净值曲线更直观，初始值设为 1.0。
+            "equity_strategy": (1 + report["return"] - report["cost"]).cumprod(),
+            "equity_benchmark": (1 + report["bench"]).cumprod(),
+            "equity_excess": (1 + report["return"] - report["bench"] - report["cost"]).cumprod(),
         })
         return report_df
+
+    def plot_equity_curves(self, return_df: pd.DataFrame, ex_return_df: pd.DataFrame, bench_df: pd.DataFrame, save_dir: str):
+        """Plot and save the equity curve figures for strategy evaluation."""
+        # Check if DataFrames have valid numeric data
+        if return_df.empty or ex_return_df.empty:
+            print("⚠️ Warning: return_df or ex_return_df is empty. Skipping equity curve plot.")
+            return
+        
+        # Ensure data is numeric
+        return_df = return_df.apply(pd.to_numeric, errors='coerce')
+        ex_return_df = ex_return_df.apply(pd.to_numeric, errors='coerce')
+        if bench_df is not None and 'return' in bench_df.columns:
+            bench_df['return'] = pd.to_numeric(bench_df['return'], errors='coerce')
+        
+        if return_df.empty or ex_return_df.empty or return_df.isna().all().all():
+            print("⚠️ Warning: No valid numeric data to plot. Skipping equity curve visualization.")
+            return
+        
+        os.makedirs(save_dir, exist_ok=True)
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+        return_df.plot(ax=axes[0], title='Equity Curve with Cost', grid=True, linewidth=1.5)
+        if bench_df is not None and 'return' in bench_df.columns and not bench_df['return'].isna().all():
+            axes[0].plot(bench_df.index, bench_df['return'], label=self.config.instrument.upper(), color='black', linestyle='--', linewidth=1.2)
+        axes[0].set_ylabel('Net Value')
+        axes[0].legend()
+
+        ex_return_df.plot(ax=axes[1], title='Excess Equity Curve with Cost', grid=True, linewidth=1.5)
+        axes[1].set_xlabel('Date')
+        axes[1].set_ylabel('Excess Net Value')
+        axes[1].legend()
+
+        plt.tight_layout()
+        output_path = os.path.join(save_dir, 'equity_curve.png')
+        plt.savefig(output_path, dpi=200, bbox_inches='tight')
+        plt.show()
+        print(f"Saved equity curve to: {output_path}")
 
     def run_and_plot_results(self, signals: dict[str, pd.DataFrame]):
         """
@@ -170,6 +214,7 @@ class QlibBacktest:
                                                and values are prediction DataFrames.
         """
         return_df, ex_return_df, bench_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        equity_df, excess_equity_df = pd.DataFrame(), pd.DataFrame()
 
         for signal_name, pred_df in signals.items():
             print(f"\nBacktesting signal: {signal_name}...")
@@ -180,24 +225,13 @@ class QlibBacktest:
 
             return_df[signal_name] = report_df['cum_return_w_cost']
             ex_return_df[signal_name] = report_df['cum_ex_return_w_cost']
+            equity_df[signal_name] = report_df['equity_strategy']
+            excess_equity_df[signal_name] = report_df['equity_excess']
             if 'return' not in bench_df:
-                bench_df['return'] = report_df['cum_bench']
+                bench_df['return'] = report_df['equity_benchmark']
 
-        # Plotting results
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-        return_df.plot(ax=axes[0], title='Cumulative Return with Cost', grid=True)
-        axes[0].plot(bench_df['return'], label=self.config.instrument.upper(), color='black', linestyle='--')
-        axes[0].legend()
-        axes[0].set_ylabel("Cumulative Return")
-
-        ex_return_df.plot(ax=axes[1], title='Cumulative Excess Return with Cost', grid=True)
-        axes[1].legend()
-        axes[1].set_xlabel("Date")
-        axes[1].set_ylabel("Cumulative Excess Return")
-
-        plt.tight_layout()
-        plt.savefig("../figures/backtest_result_example.png", dpi=200)
-        plt.show()
+        save_dir = os.path.join(self.config.backtest_result_path, self.config.backtest_save_folder_name)
+        self.plot_equity_curves(equity_df, excess_equity_df, bench_df, save_dir)
 
 
 # =================================================================================
@@ -208,8 +242,25 @@ def load_models(config: dict) -> tuple[KronosTokenizer, Kronos]:
     """Loads the fine-tuned tokenizer and predictor model."""
     device = torch.device(config['device'])
     print(f"Loading models onto device: {device}...")
-    tokenizer = KronosTokenizer.from_pretrained(config['tokenizer_path']).to(device).eval()
-    model = Kronos.from_pretrained(config['model_path']).to(device).eval()
+    # If the paths point to local directories/files, prefer local loading
+    tok_path = config['tokenizer_path']
+    model_path = config['model_path']
+
+    tok_kwargs = {}
+    model_kwargs = {}
+    try:
+        if os.path.exists(os.path.expanduser(tok_path)):
+            tok_kwargs['local_files_only'] = True
+    except Exception:
+        pass
+    try:
+        if os.path.exists(os.path.expanduser(model_path)):
+            model_kwargs['local_files_only'] = True
+    except Exception:
+        pass
+
+    tokenizer = KronosTokenizer.from_pretrained(tok_path, **tok_kwargs).to(device).eval()
+    model = Kronos.from_pretrained(model_path, **model_kwargs).to(device).eval()
     return tokenizer, model
 
 
@@ -236,7 +287,7 @@ def collate_fn_for_inference(batch):
     return x_batch, x_stamp_batch, y_stamp_batch, list(symbols), list(timestamps)
 
 
-def generate_predictions(config: dict, test_data: dict) -> dict[str, pd.DataFrame]:
+def generate_predictions(config: dict, test_data: dict, base_config: Config) -> dict[str, pd.DataFrame]:
     """
     Runs inference on the test dataset to generate prediction signals.
 
@@ -252,7 +303,8 @@ def generate_predictions(config: dict, test_data: dict) -> dict[str, pd.DataFram
     device = torch.device(config['device'])
 
     # Use the Dataset and DataLoader for efficient batching and processing
-    dataset = QlibTestDataset(data=test_data, config=Config())
+    # Use the provided base_config to ensure dataset/window settings match preprocessing
+    dataset = QlibTestDataset(data=test_data, config=base_config)
     loader = DataLoader(
         dataset,
         batch_size=config['batch_size'] // config['sample_count'],
@@ -302,7 +354,7 @@ def generate_predictions(config: dict, test_data: dict) -> dict[str, pd.DataFram
 def main():
     """Main function to set up config, run inference, and execute backtesting."""
     parser = argparse.ArgumentParser(description="Run Kronos Inference and Backtesting")
-    parser.add_argument("--device", type=str, default="cuda:1", help="Device for inference (e.g., 'cuda:0', 'cpu')")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Device for inference (e.g., 'cuda:0', 'cpu')")
     args = parser.parse_args()
 
     # --- 1. Configuration Setup ---
@@ -311,11 +363,11 @@ def main():
     # Create a dedicated dictionary for this run's configuration
     run_config = {
         'device': args.device,
-        'data_path': base_config.dataset_path,
-        'result_save_path': base_config.backtest_result_path,
+        'data_path': str(PROJECT_ROOT / base_config.dataset_path),
+        'result_save_path': str(PROJECT_ROOT / base_config.backtest_result_path),
         'result_name': base_config.backtest_save_folder_name,
-        'tokenizer_path': base_config.finetuned_tokenizer_path,
-        'model_path': base_config.finetuned_predictor_path,
+        'tokenizer_path': str(PROJECT_ROOT / base_config.finetuned_tokenizer_path),
+        'model_path': str(PROJECT_ROOT / base_config.finetuned_predictor_path),
         'max_context': base_config.max_context,
         'pred_len': base_config.predict_window,
         'clip': base_config.clip,
@@ -336,9 +388,17 @@ def main():
     print(f"Loading test data from {test_data_path}...")
     with open(test_data_path, 'rb') as f:
         test_data = pickle.load(f)
-    print(test_data)
+    print(f"✅ Test data loaded. Type: {type(test_data)}, Keys: {list(test_data.keys()) if isinstance(test_data, dict) else 'N/A'}")
+    if isinstance(test_data, dict):
+        for key in list(test_data.keys())[:3]:  # Print first 3 keys as sample
+            print(f"   Sample key '{key}': shape={test_data[key].shape if hasattr(test_data[key], 'shape') else 'N/A'}")
+    
     # --- 3. Generate Predictions ---
-    model_preds = generate_predictions(run_config, test_data)
+    print("Starting inference...")
+    model_preds = generate_predictions(run_config, test_data, base_config)
+    print(f"✅ Predictions generated. Keys: {list(model_preds.keys())}")
+    for sig_type, pred_df in model_preds.items():
+        print(f"   Signal '{sig_type}': shape={pred_df.shape}, non-null count={pred_df.notna().sum().sum()}")
 
     # --- 4. Save Predictions ---
     save_dir = os.path.join(run_config['result_save_path'], run_config['result_name'])
@@ -347,6 +407,7 @@ def main():
     print(f"Saving prediction signals to {predictions_file}...")
     with open(predictions_file, 'wb') as f:
         pickle.dump(model_preds, f)
+    print(f"✅ Predictions saved.")
 
     # --- 5. Run Backtesting ---
     with open(predictions_file, 'rb') as f:
