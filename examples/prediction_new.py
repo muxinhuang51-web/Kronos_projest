@@ -1,3 +1,4 @@
+from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,8 +15,9 @@ from typing import Dict, List, Tuple, Optional
 
 warnings.filterwarnings('ignore')
 
-# 添加项目路径以便导入自定义模块
-sys.path.append("../")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 try:
     from model import Kronos, KronosTokenizer, KronosPredictor
 except ImportError:
@@ -1307,9 +1309,9 @@ def main():
     STOCK_CONFIG = {
         "stock_code": "603288",
         "stock_name": "海天味业",
-        "data_dir": r"D:\lianghuajiaoyi\Kronos\examples\data",
+        "data_dir": str(PROJECT_ROOT / "examples" / "data"),
         "pred_days": 60,
-        "output_dir": r"D:\lianghuajiaoyi\Kronos\examples\yuce",
+        "output_dir": str(PROJECT_ROOT / "examples" / "yuce"),
         "history_years": 1
     }
 
