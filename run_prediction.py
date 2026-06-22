@@ -1,12 +1,13 @@
 import argparse
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
 from model import Kronos, KronosTokenizer, KronosPredictor
 
 
-def resolve_csv_path(user_csv: str | None) -> Path:
+def resolve_csv_path(user_csv: Optional[str]) -> Path:
 	project_root = Path(__file__).resolve().parent
 	default_candidates = [
 		project_root / "data" / "XSHG_5min_600977.csv",
