@@ -1,0 +1,164 @@
+# Draft configuration. Values marked "discussion" are not final decisions.
+
+experiment:
+  name: s1_next_token_all_a_share_baseline
+  status: draft
+  seed: 100
+
+data:
+  provider: tushare
+  credential_env: TUSHARE_TOKEN
+  raw_root: data/a_share_daily/raw
+  source_path: data/a_share_daily/processed
+  source_format: parquet_dataset
+  manifest_path: data/a_share_daily/manifests/dataset_manifest.json
+
+  asset_column: ts_code
+  timestamp_column: timestamps
+  feature_columns: [open, high, low, close, volume, amount]
+
+  date_range:
+    start: 2016-01-01
+    end: latest_complete_trading_day
+
+  universe:
+    type: point_in_time_all_a_share
+    include_list_status: [L, D, P]
+    exclude_current_status_filters: true
+
+  corporate_actions:
+    price_adjustment: backward_adjusted
+    adjusted_price_formula: raw_ohlc_times_daily_adj_factor
+    adjust_volume: false
+    adjust_amount: false
+
+  calendar:
+    exchange_calendar: cn_a_share
+    target_must_be_next_open_day: true
+    allow_internal_context_gaps: true
+    forward_fill_suspensions: false
+
+  # Accepted sample contract (Scheme A): one context predicts one final S1 token.
+  lookback: 256
+  horizon: 1
+  supervise_positions: last_only
+
+  # Accepted normalization contract: statistics come from context only and
+  # are reused to normalize the target row.
+  normalization: context_only
+  normalization_ddof: 0
+  normalization_epsilon: 1.0e-5
+  clip: 5.0
+
+  normalization_diagnostics:
+    - near_zero_std_rate
+    - target_clip_rate
+
+  split:
+    strategy: global_target_date
+    train: [2016-01-01, 2023-12-31]
+    validation: [2024-01-01, 2024-12-31]
+    test: [2025-01-01, latest_complete_trading_day]
+
+  sampling:
+    strategy: uniform_valid_window
+    sampling_unit: [ts_code, target_date]
+    # Match finetune/dataset.py: __getitem__ ignores its positional index and
+    # independently draws a random valid window, so duplicates are allowed.
+    replacement: true
+    shuffle_each_epoch: true
+    train_resample_each_epoch: true
+    validation_resample_each_epoch: false
+    validation_seed: 100
+    balance_by_asset: false
+    balance_by_date: false
+    balance_by_token: false
+    balance_by_regime: false
+    hard_example_mining: false
+    samples_per_epoch: 100000
+    validation_samples: 20000
+
+model:
+  tokenizer: NeoQuasar/Kronos-Tokenizer-base
+  tokenizer_revision: 0e0117387f39004a9016484a186a908917e22426
+  predictor: NeoQuasar/Kronos-small
+  predictor_revision: 901c26c1332695a2a8f243eb2f37243a37bea320
+
+  freeze_tokenizer: true
+  tokenizer_policy: permanently_frozen
+  enforce_no_tokenizer_gradients: true
+  allow_tokenizer_checkpoint_override: false
+
+  # Accepted predictor policy: train only DualHead.proj_s1 weight and bias.
+  train_scope: head_only
+  trainable_parameter_prefixes:
+    - head.proj_s1
+  enforce_predictor_trainable_allowlist: true
+  expected_trainable_parameters: 525312
+
+objective:
+  target: s1_next_token
+  loss: cross_entropy
+  reduction: mean
+  class_weights: null
+  label_smoothing: 0.0
+  auxiliary_losses: []
+
+training:
+  device: cuda:0
+  precision: fp32
+  batch_size: 50
+  batch_size_scope: per_gpu
+  gradient_accumulation_steps: 1
+  epochs: 30
+  num_workers: 2
+  pin_memory: true
+  train_drop_last: true
+  validation_drop_last: false
+
+  optimizer: adamw
+  head_learning_rate: 4.0e-5
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  weight_decay: 0.1
+  max_grad_norm: 3.0
+
+  scheduler: one_cycle
+  one_cycle_pct_start: 0.03
+  one_cycle_div_factor: 10
+  # Defaults used by torch OneCycleLR because the original code does not
+  # override them explicitly.
+  one_cycle_final_div_factor: 10000
+  one_cycle_anneal_strategy: cos
+  one_cycle_three_phase: false
+  log_interval_steps: 100
+  validation_interval_epochs: 1
+
+evaluation:
+  # These metrics describe the optimized S1 objective and may be used for
+  # checkpoint selection.
+  primary_s1_metrics:
+    - s1_cross_entropy
+    - s1_perplexity
+    - s1_top1_accuracy
+    - s1_top5_accuracy
+    - s1_bit_accuracy
+    - s1_hamming_distance
+
+  # These are experimental impact observations only. They must not contribute
+  # to the training loss or checkpoint selection in this experiment.
+  observational_metrics:
+    - s2_degradation
+    - full_kline_error
+    - rank_ic
+    - strategy_return
+    - five_step_rollout
+    - multi_step_trading_value
+    - ohlc_violation_rate
+
+  observational_metrics_affect_optimization: false
+  observational_metrics_affect_checkpoint_selection: false
+
+outputs:
+  root_dir: post-train/outputs
+  save_best_by: s1_cross_entropy
